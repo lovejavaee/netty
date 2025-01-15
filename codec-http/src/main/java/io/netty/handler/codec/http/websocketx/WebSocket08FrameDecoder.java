@@ -397,7 +397,7 @@ public class WebSocket08FrameDecoder extends ByteToMessageDecoder
 
         int intMask = mask;
         // Avoid sign extension on widening primitive conversion
-        long longMask = (long) intMask & 0xFFFFFFFFL;
+        long longMask = intMask & 0xFFFFFFFFL;
         longMask |= longMask << 32;
 
         for (int lim = end - 7; i < lim; i += 8) {
@@ -454,7 +454,7 @@ public class WebSocket08FrameDecoder extends ByteToMessageDecoder
 
     private static int toFrameLength(long l) {
         if (l > Integer.MAX_VALUE) {
-            throw new TooLongFrameException("Length:" + l);
+            throw new TooLongFrameException("frame length exceeds " + Integer.MAX_VALUE + ": " + l);
         } else {
             return (int) l;
         }

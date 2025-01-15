@@ -20,7 +20,10 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.PrematureChannelClosureException;
 import io.netty.util.CharsetUtil;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
 import java.util.ArrayList;
@@ -37,6 +40,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -103,6 +107,34 @@ public class HttpResponseDecoderTest {
 
         assertFalse(ch.finish());
         assertNull(ch.readInbound());
+    }
+
+    @Test
+    void testTotalHeaderLimit() throws Exception {
+        String requestStr = "HTTP/1.1 200 OK\r\n" +
+                "Server: X\r\n" + // 9 content bytes
+                "a1: b\r\n" +     // + 5 = 14 bytes,
+                "a2: b\r\n\r\n";  // + 5 = 19 bytes
+
+        // Decoding with a max header size of 18 bytes must fail:
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpResponseDecoder(1024, 18, 1024));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
+        HttpResponse response = channel.readInbound();
+        assertTrue(response.decoderResult().isFailure());
+        assertInstanceOf(TooLongHttpHeaderException.class, response.decoderResult().cause());
+        assertFalse(channel.finish());
+
+        // Decoding with a max header size of 19 must pass:
+        channel = new EmbeddedChannel(new HttpResponseDecoder(1024, 19, 1024));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
+        response = channel.readInbound();
+        assertTrue(response.decoderResult().isSuccess());
+        assertEquals("X", response.headers().get("Server"));
+        assertEquals("b", response.headers().get("a1"));
+        assertEquals("b", response.headers().get("a2"));
+        channel.close();
+        assertEquals(LastHttpContent.EMPTY_LAST_CONTENT, channel.readInbound());
+        assertFalse(channel.finish());
     }
 
     @Test
@@ -1046,6 +1078,20 @@ public class HttpResponseDecoderTest {
     }
 
     @Test
+    public void testStatusWithoutReasonPhrase() {
+        String responseStr = "HTTP/1.1 200 \r\n" +
+                "Content-Length: 0\r\n\r\n";
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpResponseDecoder());
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(responseStr, CharsetUtil.US_ASCII)));
+        HttpResponse response = channel.readInbound();
+        assertTrue(response.decoderResult().isSuccess());
+        assertEquals(HttpResponseStatus.OK, response.status());
+        HttpContent c = channel.readInbound();
+        c.release();
+        assertFalse(channel.finish());
+    }
+
+    @Test
     public void testHeaderNameStartsWithControlChar1c() {
         testHeaderNameStartsWithControlChar(0x1c);
     }
@@ -1114,12 +1160,21 @@ public class HttpResponseDecoderTest {
         testInvalidHeaders0(responseBuffer);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = { "HTP/1.1", "HTTP", "HTTP/1x", "Something/1.1", "HTTP/1",
+            "HTTP/1.11", "HTTP/11.1", "HTTP/A.1", "HTTP/1.B"})
+    public void testInvalidVersion(String version) {
+        testInvalidHeaders0(Unpooled.copiedBuffer(
+                version + " 200 OK\n\r\nHost: whatever\r\n\r\n", CharsetUtil.US_ASCII));
+    }
+
     private static void testInvalidHeaders0(ByteBuf responseBuffer) {
         EmbeddedChannel channel = new EmbeddedChannel(new HttpResponseDecoder());
         assertTrue(channel.writeInbound(responseBuffer));
         HttpResponse response = channel.readInbound();
         assertThat(response.decoderResult().cause(), instanceOf(IllegalArgumentException.class));
         assertTrue(response.decoderResult().isFailure());
+        ReferenceCountUtil.release(response);
         assertFalse(channel.finish());
     }
 }
